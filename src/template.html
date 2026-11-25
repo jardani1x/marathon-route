@@ -92,6 +92,8 @@ html.dark #readout .next { color: #5fd3a8; }
 .navthen { display: flex; gap: 8px; align-items: center; padding: 6px 14px; font-size: 13px; background: rgba(0,0,0,.2); }
 .navthen svg { width: 18px; height: 18px; stroke-width: 2.6; }
 #stage.street #readout { top: auto; bottom: 10px; }
+#osmAttr { position: absolute; right: 8px; bottom: 6px; z-index: 5; font-size: 10.5px; color: var(--muted); background: var(--overlay); border-radius: 4px; padding: 1px 5px; }
+#osmAttr a { color: inherit; }
 #streetHint { position: absolute; right: 10px; top: 10px; z-index: 5; background: var(--overlay); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 9px; font-size: 12px; color: var(--muted); max-width: 190px; }
 #views { position: absolute; right: 10px; top: 10px; z-index: 5; display: flex; flex-direction: column; gap: 4px; }
 #views button { border: 1px solid var(--rule); background: var(--overlay); border-radius: 7px; min-width: 44px; padding: 6px 8px; font-weight: 600; font-size: 12px; }
@@ -205,6 +207,7 @@ input[type="range"] { width: 100%; accent-color: var(--course); }
       </div>
       <div class="navthen" id="navThen" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path id="navThenIcon" d=""/></svg><span id="navThenText"></span></div>
     </div>
+    <div id="osmAttr" hidden>Buildings &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</div>
     <div id="streetHint" hidden>Drag to look around. Scroll or pinch to move the camera closer. Double-click to reset.</div>
     <div id="views" role="group" aria-label="Camera">
       <button type="button" data-view="iso">Iso</button>
@@ -286,6 +289,13 @@ input[type="range"] { width: 100%; accent-color: var(--course); }
         <label class="toggle" for="shSigns"><input id="shSigns" type="checkbox" checked> Turn signs in street view</label>
         <label class="toggle" for="shGrade"><input id="shGrade" type="checkbox"> Colour the course by gradient</label>
         <div id="gradeLegend" hidden><div class="ramp"></div><div class="rampl"><span>&minus;4% down</span><span>flat</span><span>+4% up</span></div></div>
+      </div>
+      <div class="card">
+        <span class="legend">3D buildings</span>
+        <p id="cityText"></p>
+        <label class="toggle" for="shCity"><input id="shCity" type="checkbox" checked> Buildings, trees and parks</label>
+        <label class="toggle" for="shLamps"><input id="shLamps" type="checkbox" checked> Street lamps along the course (decorative)</label>
+        <div class="rowwrap"><button id="cityLoad" class="btn" type="button">Load buildings</button></div>
       </div>
       <div class="card">
         <span class="legend">Road geometry</span>

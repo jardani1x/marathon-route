@@ -6,10 +6,14 @@ const { chromium } = require('playwright'); const SHOTS=require('path').join(__d
   const ctx=await browser.newContext({viewport:{width:vw,height:vh},deviceScaleFactor:2,hasTouch:vw<700});
   const page=await ctx.newPage(); const errs=[];
   page.on('console',m=>{ if(m.type()==='error') errs.push(m.text()); }); page.on('pageerror',e=>errs.push('PAGEERROR '+e.message));
-  let overpassCalls=0, lastBody='';
+  let overpassCalls=0, lastBody='', cityCalls=0;
   await page.route('**/*',route=>{ const u=route.request().url();
     if(u.startsWith('file:')) return route.continue();
     if(/overpass/.test(u)){ overpassCalls++; lastBody=route.request().postData()||'';
+      // mode 'city': road requests fail, building requests get the synthetic city (test/gen_features.py)
+      const isCity=/building/.test(decodeURIComponent(lastBody));
+      if(mode==='city' && isCity){ cityCalls++; return route.fulfill({status:200,contentType:'application/json',headers:{'access-control-allow-origin':'*'},body:fs.readFileSync(path.join(__dirname,'synth_features.json'))}); }
+      if(mode==='city') return route.fulfill({status:504,body:'busy'});
       if(mode==='mock') return route.fulfill({status:200,contentType:'application/json',headers:{'access-control-allow-origin':'*'},body:fs.readFileSync(path.join(__dirname,'synth_overpass.json'))});
       if(mode==='http500') return route.fulfill({status:504,body:'busy'}); }
     return route.abort(); });
@@ -40,6 +44,9 @@ const { chromium } = require('playwright'); const SHOTS=require('path').join(__d
     await page.waitForTimeout(500);
     if(!st.startsWith('search:')||true) await page.screenshot({path:path.join(SHOTS,`s_${tag}_${n++}.png`)});
   }
+  if(process.env.RELOAD){ await page.reload(); await page.waitForTimeout(2500); console.log(tag,'after reload: city status',await page.evaluate(()=>window.__sgim.city.status+' '+(window.__sgim.city.data?window.__sgim.city.data.buildings.length:0)),'city requests so far',cityCalls); await page.click('#viewStreet'); await page.waitForTimeout(1500); await page.screenshot({path:path.join(SHOTS,`s_${tag}_reload.png`)}); }
+  const cs=await page.evaluate(()=>{const c=window.__sgim.city;return {status:c.status,done:c.done.filter(Boolean).length+'/'+c.total,stats:c.stats,attr:!document.getElementById('osmAttr').hidden};});
+  console.log(tag,'city',JSON.stringify(cs),'city requests',cityCalls);
   const end=await page.evaluate(()=>({km:window.__sgim.state.km,sel:window.__sgim.state.sel,overflowX:document.documentElement.scrollWidth>document.documentElement.clientWidth,list:document.querySelectorAll('#list li').length}));
   console.log(tag,'end',JSON.stringify(end),'errors',JSON.stringify(errs.filter(e=>!/ERR_FAILED|net::|Failed to load resource/.test(e))));
   await browser.close();

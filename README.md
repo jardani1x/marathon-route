@@ -19,13 +19,14 @@ Opening `index.html` straight from disk also works. The only exception is the Ma
 | | |
 |---|---|
 | **3D overview** | Course over a street underlay, kilometre markers, landmarks, elevation curtain, adjustable vertical exaggeration, camera presets (Iso, Top, N/E/S/W). |
-| **Street view** | Chase camera behind the runner at true scale. It shows the road with a race line and cones, a gantry at every kilometre, and turn signs 30 m before each turn. Drag to look around, scroll or pinch to zoom. |
+| **Street view** | Chase camera behind the runner at true scale. It shows the road with a race line and cones, a gantry at every kilometre, turn signs 30 m before each turn, and street lamps (decorative). Drag to look around, scroll or pinch to zoom. |
+| **Buildings** | Real building footprints and heights, plus trees and parks, from OpenStreetMap within about 230 m of the course. They load the first time you open Street view, in seven pieces, and are kept in the browser (IndexedDB) for 30 days. Windows light up in the dark theme. |
 | **Turn-by-turn** | Banner with the next instruction, distance and a "then" line. The **Directions** filter lists all instructions. |
 | **Race clock** | The runner covers the course on your target time, in real time or at 10× to 300×. Pacing is *even pace* or *even effort* (slower uphill, faster downhill). Shows elapsed time, clock time from 4:30 am, current pace and **Splits**. |
 | **Elevation profile** | Doubles as the timeline: drag to scrub. Turn ticks run along the top. |
 | **Map view** | Leaflet 2D map with the route, kilometre markers and landmarks. Tiles come from OpenStreetMap (recoloured to the theme), CARTO light/dark (free key) or any provider URL. |
 | **Road snapping** | On load it fetches roads from the OpenStreetMap Overpass API near the trace and snaps the course to them. If that fails it falls back to the built-in trace. |
-| **Other** | Light and dark themes, search, GPX/GeoJSON export, keyboard shortcuts. Settings are kept in `localStorage`. |
+| **Other** | Light and dark themes (both in Street view, where the dark one is the 4:30 am race), search, GPX/GeoJSON export, keyboard shortcuts. Settings are kept in `localStorage`. |
 
 ![3D overview](docs/overview-3d.jpg)
 
@@ -83,6 +84,7 @@ npm test                                         # core geometry, snapping, paci
 CHROME_PATH=/path/to/chrome npm run test:browser # race clock timing, finish, splits, map tiles (headless Chrome)
 python3 test/run_blender.py                      # needs the bpy module; checks runner positions, rebuilds the .blend
 node test/shot.js blocked 1280 800 demo "street,km16" # screenshots into build/shots/
+node test/shot.js city 390 780 city "street,wait3500,km2" # street view with the synthetic city
 ```
 
 ## Data and accuracy
@@ -94,12 +96,15 @@ This is an unofficial reconstruction. Check anything you rely on against the [of
 - **Elevation:** digitised from the map's profile and pinned to its nine labelled points. Total gain is 65.4 m; the official figure is 68.3 m.
 - **Turn-by-turn:** worked out from the traced line and the named road sections in `data/data.json`. Road names that the map doesn't label are marked as inferred. Ramps and complicated junctions (for example the ECP exit ramp around 17–18 km) are the least reliable.
 - **Pacing:** *even effort* scales pace with the energy cost of running on a slope (Minetti et al., 2002, *J Appl Physiol* 93:1039) and counts only half of the downhill saving. That halving is an assumption. Heat, fatigue, crowding and drink stops aren't modelled.
-- **Street view:** heights are true metres above the surrounding course, so bridges rise and roads sit on the map. There are no buildings or trees.
-- **Not yet tested against the live services:** the Overpass road fetch and the OpenStreetMap and CARTO tile requests have only been exercised against mocked responses.
+- **Street view:** heights are true metres above the surrounding course, so bridges rise and roads sit on the map.
+- **Buildings:** OpenStreetMap footprints. Height comes from the `height` tag, else `building:levels` × 3.2 m, else a default for the building type (an assumption). Settings shows the split for what loaded. Buildings the course line runs through are left out. That matters until the course is snapped to OpenStreetMap roads, because the built-in trace can be tens of metres off. Building parts replace their outline, which is how OSM models shaped towers. Roofs are flat.
+- **Street lamps** along the course are decorative, not from map data.
+- **Ground flicker:** the ground, map underlay and parks are drawn in a separate pass before everything else, so flat layers can't fight for depth.
+- **Not yet tested against the live services:** the Overpass road and building fetches and the OpenStreetMap and CARTO tile requests have only been exercised against mocked responses (`test/synth_*.json`). The building test data is synthetic: rows of blocks along the real course, generated by `test/gen_features.py`.
 
 ## Credits
 
-- Road data and map tiles: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL) when fetched; optional [CARTO](https://carto.com/attributions) basemaps (key required).
+- Road, building, tree and park data and map tiles: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL) when fetched; optional [CARTO](https://carto.com/attributions) basemaps (key required).
 - [three.js](https://threejs.org/) (MIT) and [Leaflet](https://leafletjs.com/) (BSD-2-Clause).
 - Course, elevation profile and landmarks are derived from the organiser's published route map. This project is not affiliated with or endorsed by the BYD Singapore International Marathon or its organisers.
 

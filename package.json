@@ -6,7 +6,7 @@
   "scripts": {
     "build": "python3 scripts/build_viewer.py && python3 scripts/build_blender.py",
     "serve": "python3 -m http.server 8000",
-    "test": "node test/test_core.js && node test/test_turns.js && python3 test/test_port.py",
+    "test": "node test/test_core.js && node test/test_turns.js && node test/test_features.js && python3 test/test_port.py",
     "test:browser": "node test/sim.js && node test/tiles.js"
   },
   "devDependencies": {

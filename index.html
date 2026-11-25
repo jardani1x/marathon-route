@@ -753,6 +753,8 @@ html.dark #readout .next { color: #5fd3a8; }
 .navthen { display: flex; gap: 8px; align-items: center; padding: 6px 14px; font-size: 13px; background: rgba(0,0,0,.2); }
 .navthen svg { width: 18px; height: 18px; stroke-width: 2.6; }
 #stage.street #readout { top: auto; bottom: 10px; }
+#osmAttr { position: absolute; right: 8px; bottom: 6px; z-index: 5; font-size: 10.5px; color: var(--muted); background: var(--overlay); border-radius: 4px; padding: 1px 5px; }
+#osmAttr a { color: inherit; }
 #streetHint { position: absolute; right: 10px; top: 10px; z-index: 5; background: var(--overlay); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 9px; font-size: 12px; color: var(--muted); max-width: 190px; }
 #views { position: absolute; right: 10px; top: 10px; z-index: 5; display: flex; flex-direction: column; gap: 4px; }
 #views button { border: 1px solid var(--rule); background: var(--overlay); border-radius: 7px; min-width: 44px; padding: 6px 8px; font-weight: 600; font-size: 12px; }
@@ -866,6 +868,7 @@ input[type="range"] { width: 100%; accent-color: var(--course); }
       </div>
       <div class="navthen" id="navThen" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path id="navThenIcon" d=""/></svg><span id="navThenText"></span></div>
     </div>
+    <div id="osmAttr" hidden>Buildings &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</div>
     <div id="streetHint" hidden>Drag to look around. Scroll or pinch to move the camera closer. Double-click to reset.</div>
     <div id="views" role="group" aria-label="Camera">
       <button type="button" data-view="iso">Iso</button>
@@ -947,6 +950,13 @@ input[type="range"] { width: 100%; accent-color: var(--course); }
         <label class="toggle" for="shSigns"><input id="shSigns" type="checkbox" checked> Turn signs in street view</label>
         <label class="toggle" for="shGrade"><input id="shGrade" type="checkbox"> Colour the course by gradient</label>
         <div id="gradeLegend" hidden><div class="ramp"></div><div class="rampl"><span>&minus;4% down</span><span>flat</span><span>+4% up</span></div></div>
+      </div>
+      <div class="card">
+        <span class="legend">3D buildings</span>
+        <p id="cityText"></p>
+        <label class="toggle" for="shCity"><input id="shCity" type="checkbox" checked> Buildings, trees and parks</label>
+        <label class="toggle" for="shLamps"><input id="shLamps" type="checkbox" checked> Street lamps along the course (decorative)</label>
+        <div class="rowwrap"><button id="cityLoad" class="btn" type="button">Load buildings</button></div>
       </div>
       <div class="card">
         <span class="legend">Road geometry</span>
@@ -1486,7 +1496,150 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     return { km: km, m: m };
   }
 
+  // ---------- OpenStreetMap buildings, trees and green areas near the course ----------
+  function buildOverpassFeaturesQuery(routeLL, radius) {
+    var c = routeLL.map(function (p) { return p[0].toFixed(5) + ',' + p[1].toFixed(5); }).join(','), r = radius || 230;
+    return '[out:json][timeout:120];(' +
+      'way[building](around:' + r + ',' + c + ');' +
+      'way["building:part"](around:' + r + ',' + c + ');' +
+      'node[natural=tree](around:45,' + c + ');' +
+      'way[leisure~"^(park|garden|pitch|playground|golf_course)$"](around:' + r + ',' + c + ');' +
+      'way[landuse~"^(grass|recreation_ground|village_green|cemetery)$"](around:' + r + ',' + c + ');' +
+      'way[natural~"^(wood|scrub|grassland)$"](around:' + r + ',' + c + ');' +
+      ');out geom qt;';
+  }
+  // "12", "12 m", "40'" -> metres; NaN if absent
+  function parseMetres(v) {
+    if (v == null) return NaN;
+    var m = String(v).replace(',', '.').match(/-?\d+(\.\d+)?/);
+    if (!m) return NaN;
+    var n = parseFloat(m[0]);
+    return /ft|'/.test(String(v)) ? n * 0.3048 : n;
+  }
+  var KIND = {
+    residential: /^(apartments|residential|house|detached|semidetached_house|terrace|dormitory|bungalow)$/,
+    commercial: /^(commercial|office|retail|hotel|supermarket|mall)$/,
+    civic: /^(school|university|college|hospital|public|civic|government|church|cathedral|temple|mosque|chapel|museum|train_station|transportation|stadium|sports_centre|fire_station|police)$/,
+    industrial: /^(industrial|warehouse|manufacture|hangar|service|parking|garage|garages|carport)$/,
+    light: /^(roof|shed|hut|kiosk|cabin|toilets|shelter|bridge|canopy)$/
+  };
+  var DEFAULT_H = { residential: 36, commercial: 24, civic: 16, industrial: 9, light: 4, other: 10 };
+  function buildingKind(v) {
+    for (var k in KIND) if (KIND[k].test(v)) return k;
+    return 'other';
+  }
+  /* Height and base from OSM tags: height / building:levels (3.2 m a storey, plus a little for the roof),
+     min_height / building:min_level. Without either, a default for the kind of building (an assumption). */
+  function buildingHeight(tags) {
+    var kind = buildingKind(tags.building && tags.building !== 'yes' ? tags.building : (tags['building:part'] && tags['building:part'] !== 'yes' ? tags['building:part'] : ''));
+    var h = parseMetres(tags.height), lv = parseMetres(tags['building:levels']), mh = parseMetres(tags.min_height), mlv = parseMetres(tags['building:min_level']);
+    var source = 'height';
+    if (!(h > 0)) { if (lv > 0) { h = lv * 3.2 + 1; source = 'levels'; } else { h = DEFAULT_H[kind]; source = 'default'; } }
+    if (!(mh >= 0)) mh = mlv > 0 ? mlv * 3.2 : 0;
+    if (kind === 'light' && !(mh > 0) && /^(roof|canopy|shelter)$/.test(tags.building || '')) mh = Math.max(0, h - 1);
+    h = Math.min(h, 350); mh = Math.max(0, Math.min(mh, h - 0.5));
+    return { h: h, minH: mh, kind: kind, source: source };
+  }
+  function ringArea(ll) {          // flat [x0,y0,x1,y1,...], signed shoelace area (positive = counter-clockwise)
+    var a = 0, n = ll.length / 2;
+    for (var i = 0, j = n - 1; i < n; j = i++) a += (ll[j * 2] * ll[i * 2 + 1] - ll[i * 2] * ll[j * 2 + 1]);
+    return a / 2;
+  }
+  function pointInRing(x, y, r) {  // r flat [x0,y0,...]
+    var inside = false, n = r.length / 2;
+    for (var i = 0, j = n - 1; i < n; j = i++) {
+      var xi = r[i * 2], yi = r[i * 2 + 1], xj = r[j * 2], yj = r[j * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  function centroid(r) { var x = 0, y = 0, n = r.length / 2; for (var i = 0; i < n; i++) { x += r[i * 2]; y += r[i * 2 + 1]; } return [x / n, y / n]; }
+  /* Overpass JSON -> {buildings:[{id, ll:[lat,lon,...], h, minH, kind}], trees:[{ll:[lat,lon], h}], greens:[{id, ll}]}.
+     Coordinates stay in lat/lon so the cache does not depend on the projection. A building outline that
+     contains building:part ways is replaced by its parts (that is how OSM models shaped towers). */
+  function parseFeatures(json) {
+    var out = { buildings: [], trees: [], greens: [] };
+    if (!json || !Array.isArray(json.elements)) return out;
+    var outlines = [], parts = [], seen = {};
+    json.elements.forEach(function (el) {
+      if (!el || !el.tags) return;
+      var t = el.tags;
+      if (el.type === 'node') {
+        if (t.natural === 'tree' && typeof el.lat === 'number' && typeof el.lon === 'number') out.trees.push({ ll: [+el.lat.toFixed(6), +el.lon.toFixed(6)], h: parseMetres(t.height) > 0 ? Math.min(40, parseMetres(t.height)) : 0 });
+        return;
+      }
+      if (el.type !== 'way' || !Array.isArray(el.geometry) || seen[el.id]) return;
+      seen[el.id] = 1;
+      var ll = [];
+      el.geometry.forEach(function (g) { if (g && typeof g.lat === 'number' && typeof g.lon === 'number') ll.push(+g.lat.toFixed(7), +g.lon.toFixed(7)); });
+      if (ll.length >= 4 && ll[0] === ll[ll.length - 2] && ll[1] === ll[ll.length - 1]) ll.length -= 2;   // drop the closing point
+      if (ll.length < 6) return;
+      var areaM2 = Math.abs(ringArea(ll)) * 111320 * 110574 * Math.cos(ll[0] * Math.PI / 180);
+      var bp = t['building:part'];
+      if ((t.building && t.building !== 'no') || (bp && bp !== 'no')) {
+        if (areaM2 < 6) return;
+        var hb = buildingHeight(t), rec = { id: el.id, ll: ll, h: +hb.h.toFixed(1), minH: +hb.minH.toFixed(1), kind: hb.kind, src: hb.source };
+        (bp && bp !== 'no' ? parts : outlines).push(rec);
+      } else if (areaM2 >= 30) out.greens.push({ id: el.id, ll: ll });
+    });
+    // outlines with parts inside them are drawn as their parts
+    parts.forEach(function (p) { p.c = centroid(p.ll); });
+    outlines.forEach(function (o) {
+      var r = o.ll, minA = 1e9, maxA = -1e9, minB = 1e9, maxB = -1e9;
+      for (var i = 0; i < r.length; i += 2) { minA = Math.min(minA, r[i]); maxA = Math.max(maxA, r[i]); minB = Math.min(minB, r[i + 1]); maxB = Math.max(maxB, r[i + 1]); }
+      var has = parts.some(function (p) { return p.c[0] >= minA && p.c[0] <= maxA && p.c[1] >= minB && p.c[1] <= maxB && pointInRing(p.c[0], p.c[1], r); });
+      if (!has) out.buildings.push(o);
+    });
+    parts.forEach(function (p) { delete p.c; out.buildings.push(p); });
+    return out;
+  }
+  function mergeFeatures(a, b) {
+    var ids = {};
+    a.buildings.forEach(function (x) { ids[x.id] = 1; });
+    b.buildings.forEach(function (x) { if (!ids[x.id]) { ids[x.id] = 1; a.buildings.push(x); } });
+    var tk = {}; a.trees.forEach(function (t) { tk[t.ll.join()] = 1; });
+    b.trees.forEach(function (t) { var k = t.ll.join(); if (!tk[k]) { tk[k] = 1; a.trees.push(t); } });
+    var gk = {}; a.greens.forEach(function (g) { gk[g.id] = 1; });
+    b.greens.forEach(function (g) { if (!gk[g.id]) { gk[g.id] = 1; a.greens.push(g); } });
+    return a;
+  }
+  /* Buildings that the course would run through: any corner, edge midpoint or the centre within `clear`
+     metres of the course line, or a course point inside the footprint. ringsXY: [[x0,y0,x1,y1,...]]. */
+  function corridorHits(ringsXY, routeXY, clear) {
+    var ix = buildIndex([{ pts: routeXY, foot: false }], 50), pts = resample(routeXY, 6), grid = {}, cell = 50, i, j;
+    pts.forEach(function (p) { var k = Math.floor(p[0] / cell) + ':' + Math.floor(p[1] / cell); (grid[k] || (grid[k] = [])).push(p); });
+    var any = { R: clear, maxAng: Math.PI, allowFoot: true };
+    return ringsXY.map(function (r) {
+      var n = r.length / 2, c = centroid(r);
+      if (nearest(ix, c[0], c[1], 0, any)) return true;
+      for (i = 0; i < n; i++) {
+        var x = r[i * 2], y = r[i * 2 + 1], k2 = (i + 1) % n;
+        if (nearest(ix, x, y, 0, any) || nearest(ix, (x + r[k2 * 2]) / 2, (y + r[k2 * 2 + 1]) / 2, 0, any)) return true;
+      }
+      var mx = 1e9, Mx = -1e9, my = 1e9, My = -1e9;
+      for (i = 0; i < n; i++) { mx = Math.min(mx, r[i * 2]); Mx = Math.max(Mx, r[i * 2]); my = Math.min(my, r[i * 2 + 1]); My = Math.max(My, r[i * 2 + 1]); }
+      for (i = Math.floor(mx / cell); i <= Math.floor(Mx / cell); i++) for (j = Math.floor(my / cell); j <= Math.floor(My / cell); j++) {
+        var arr = grid[i + ':' + j]; if (!arr) continue;
+        for (var q = 0; q < arr.length; q++) if (pointInRing(arr[q][0], arr[q][1], r)) return true;
+      }
+      return false;
+    });
+  }
+  // split the course into overlapping pieces of about `pieceM` metres for separate Overpass requests
+  function routePieces(xy, pieceM, stepM) {
+    var L = cumLen(xy), total = L[L.length - 1], n = Math.max(1, Math.round(total / pieceM)), out = [];
+    for (var k = 0; k < n; k++) {
+      var a = total * k / n, b = total * (k + 1) / n, seg = [];
+      for (var s = a; s < b; s += stepM) seg.push(pointAt(xy, L, s).slice(0, 2));
+      seg.push(pointAt(xy, L, b).slice(0, 2));
+      out.push(seg);
+    }
+    return out;
+  }
+
   return {
+    buildOverpassFeaturesQuery: buildOverpassFeaturesQuery, parseMetres: parseMetres, buildingHeight: buildingHeight, buildingKind: buildingKind,
+    ringArea: ringArea, pointInRing: pointInRing, parseFeatures: parseFeatures, mergeFeatures: mergeFeatures, corridorHits: corridorHits, routePieces: routePieces,
     wrapDeg: wrapDeg, classifyTurn: classifyTurn, compass: compass, computeTurns: computeTurns, nextTurnIndex: nextTurnIndex, streetGround: streetGround,
     runCost: runCost, buildPacing: buildPacing, timeAtKm: timeAtKm, kmAtTime: kmAtTime, paceAtKm: paceAtKm, fmtPace: fmtPace,
     makeProjection: makeProjection, cumLen: cumLen, findSeg: findSeg, pointAt: pointAt, resample: resample, simplify: simplify,
@@ -1516,7 +1669,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
   var K_SET = 'sgim26hm.settings.v4', K_OSM = 'sgim26hm.osm.v2';
 
   // ---------------------------------------------------------------- state
-  var DEFAULTS = { exag: 20, target: '2:00:00', showKm: true, showLm: true, showBase: true, showCurtain: true, showSigns: true, grade: false, sim: '60', pacing: 'effort', follow: false, theme: 'light' };
+  var DEFAULTS = { exag: 20, target: '2:00:00', showKm: true, showLm: true, showBase: true, showCurtain: true, showSigns: true, showCity: true, showLamps: true, grade: false, sim: '60', pacing: 'effort', follow: false, theme: 'light' };
   var saved = store.get(K_SET) || {};
   var state = {
     km: 0, playing: false, view: '3d', sel: null, filter: 'all', query: '',
@@ -1542,8 +1695,8 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
   var turns = [];
   var ground = C.streetGround(DATA.elev.km, DATA.elev.m, COURSE_KM);
   // street view height: true metres above the local ground, so roads sit on the map and bridges rise
-  // (later legs float a few cm higher so overlapping out-and-back legs do not flicker)
-  function streetY(km) { return 0.25 + Math.max(0, elevAt(km) - C.interp(ground.km, ground.m, km)) + 0.008 * km; }
+  // (later legs float a little higher, up to 0.4 m, so overlapping out-and-back legs do not flicker)
+  function streetY(km) { return 0.25 + Math.max(0, elevAt(km) - C.interp(ground.km, ground.m, km)) + 0.02 * km; }
   function setRoute(xy) {
     var L = C.cumLen(xy), total = L[L.length - 1];
     var n = Math.max(2, Math.round(total / 8)), dense = [], minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
@@ -1662,6 +1815,11 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     renderer.setClearColor(TH().sky, 1);
     var scene = new T3.Scene();
     scene.fog = new T3.Fog(TH().sky, 16000, 70000);
+    // The ground, the map underlay and parks are drawn first in a separate pass with no depth test, then the
+    // depth buffer is cleared. Flat layers centimetres apart can then never fight for depth (that fight is the
+    // flicker seen at a distance, worst on phones).
+    var bgScene = new T3.Scene(); bgScene.fog = scene.fog;
+    renderer.autoClear = false;
     scene.add(new T3.HemisphereLight(0xffffff, 0xa0a6b4, 0.95));
     var sun = new T3.DirectionalLight(0xffffff, 0.45); sun.position.set(-0.4, 1, 0.6); scene.add(sun);
     var camera = new T3.PerspectiveCamera(38, 1, 20, 120000);
@@ -1672,16 +1830,16 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     controls.addEventListener('change', invalidate);
     controls.addEventListener('start', function () { t.tween = null; });
 
-    var t = { renderer: renderer, scene: scene, camera: camera, controls: controls, tween: null, labels: [], uR: { value: 14 }, size: { w: 1, h: 1 },
+    var t = { renderer: renderer, scene: scene, bgScene: bgScene, camera: camera, controls: controls, tween: null, labels: [], uR: { value: 14 }, size: { w: 1, h: 1 },
       bmU: { cLand: { value: new T3.Color(TH().land) }, cWater: { value: new T3.Color(TH().water) }, cRoad: { value: new T3.Color(TH().road) } } };
 
     // ground + basemap underlay
-    var g = new T3.Mesh(new T3.PlaneGeometry(160000, 160000), new T3.MeshBasicMaterial({ color: TH().ground }));
-    g.rotation.x = -Math.PI / 2; g.position.y = -2; scene.add(g); t.groundMesh = g;
+    var g = new T3.Mesh(new T3.PlaneGeometry(160000, 160000), new T3.MeshBasicMaterial({ color: TH().ground, depthTest: false, depthWrite: false }));
+    g.rotation.x = -Math.PI / 2; g.position.y = -2; g.renderOrder = -10; bgScene.add(g); t.groundMesh = g;
     var b = DATA.basemap, tex = new T3.TextureLoader().load(window.SGIM_BASEMAP, invalidate);
     tex.minFilter = T3.LinearMipmapLinearFilter; tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
     // the texture holds one class per channel (R road, G water, B land, A fade); colours come from the theme
-    var bmMat = new T3.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+    var bmMat = new T3.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false });
     bmMat.onBeforeCompile = function (sh) {
       sh.uniforms.cLand = t.bmU.cLand; sh.uniforms.cWater = t.bmU.cWater; sh.uniforms.cRoad = t.bmU.cRoad;
       sh.fragmentShader = 'uniform vec3 cLand;\nuniform vec3 cWater;\nuniform vec3 cRoad;\n' + sh.fragmentShader.replace('#include <map_fragment>',
@@ -1689,7 +1847,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
         'diffuseColor.rgb = ( tc.r * cRoad + tc.g * cWater + tc.b * cLand ) / sw; diffuseColor.a *= tc.a;');
     };
     var base = new T3.Mesh(new T3.PlaneGeometry(b.x1 - b.x0, b.y1 - b.y0), bmMat);
-    base.rotation.x = -Math.PI / 2; base.position.set((b.x0 + b.x1) / 2, 0, -(b.y0 + b.y1) / 2); base.renderOrder = 1; scene.add(base);
+    base.rotation.x = -Math.PI / 2; base.position.set((b.x0 + b.x1) / 2, 0, -(b.y0 + b.y1) / 2); base.renderOrder = 1; bgScene.add(base);
     t.base = base;
 
     t.routeGroup = new T3.Group(); scene.add(t.routeGroup);
@@ -1697,6 +1855,8 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     t.osmGroup = new T3.Group(); scene.add(t.osmGroup);
     t.selGroup = new T3.Group(); scene.add(t.selGroup);
     t.streetGroup = new T3.Group(); t.streetGroup.visible = false; scene.add(t.streetGroup);
+    t.cityGroup = new T3.Group(); scene.add(t.cityGroup);
+    t.greenGroup = new T3.Group(); bgScene.add(t.greenGroup);
 
     // runner: screen-constant dot + stem
     t.figure = makeRunner(); scene.add(t.figure.group); poseRunner(t.figure, 0, false);
@@ -2011,6 +2171,22 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
       mtx.makeTranslation(e.rx, e.h + 0.375, -e.ry); cones.setMatrixAt(cnt++, mtx);
     }
     cones.count = cnt; cones.instanceMatrix.needsUpdate = true; g.add(cones);
+    // street lamps every 45 m on both sides (decorative: not from map data)
+    var poles = new T3.InstancedMesh(new T3.CylinderGeometry(0.07, 0.1, 7.5, 6), new T3.MeshLambertMaterial({ color: th.post }), Math.ceil(edges.length / 11) * 2 + 2);
+    var heads = new T3.InstancedMesh(new T3.BoxGeometry(0.35, 0.16, 1.5), new T3.MeshBasicMaterial({ color: state.theme === 'dark' ? 0xffe2a0 : 0xf4f1e6 }), Math.ceil(edges.length / 11) * 2 + 2);
+    var q4 = new T3.Quaternion(), sc3 = new T3.Vector3(1, 1, 1), up3 = new T3.Vector3(0, 1, 0), lc = 0;
+    for (i = 6; i < edges.length; i += 11) {
+      var ed = edges[i], yaw = Math.atan2(-ed.tx, ed.ty);
+      [[ed.lx, ed.ly, -1], [ed.rx, ed.ry, 1]].forEach(function (s3) {
+        var ox = s3[0] + s3[2] * 1.2 * ed.ty, oy = s3[1] - s3[2] * 1.2 * ed.tx;      // 1.2 m outside the road edge
+        mtx.compose(new T3.Vector3(ox, ed.h + 3.75, -oy), q4.identity(), sc3); poles.setMatrixAt(lc, mtx);
+        q4.setFromAxisAngle(up3, yaw + Math.PI / 2);
+        var hx = ox - s3[2] * 0.7 * ed.ty, hy = oy + s3[2] * 0.7 * ed.tx;
+        mtx.compose(new T3.Vector3(hx, ed.h + 7.45, -hy), q4, sc3); heads.setMatrixAt(lc, mtx); lc++;
+      });
+    }
+    poles.count = heads.count = lc; poles.instanceMatrix.needsUpdate = heads.instanceMatrix.needsUpdate = true;
+    poles.userData.kind = heads.userData.kind = 'lamp'; poles.visible = heads.visible = state.showLamps; g.add(poles); g.add(heads);
     var postMat = new T3.MeshLambertMaterial({ color: th.post }), courseHex = '#' + new T3.Color(COL.course).getHexString();
     // kilometre arches (start, 1-21, finish)
     function arch(km, label, big) {
@@ -2050,8 +2226,186 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
   }
   function syncStreetToggles() {
     if (!three) return;
-    three.streetGroup.children.forEach(function (o) { if (o.userData.kind === 'arch') o.visible = state.showKm; if (o.userData.kind === 'sign') o.visible = state.showSigns; });
+    three.streetGroup.children.forEach(function (o) { if (o.userData.kind === 'arch') o.visible = state.showKm; if (o.userData.kind === 'sign') o.visible = state.showSigns; if (o.userData.kind === 'lamp') o.visible = state.showLamps; });
     invalidate();
+  }
+
+  // ---- city: buildings, trees and parks from OpenStreetMap, loaded in pieces along the course and kept in IndexedDB
+  var K_CITY = 'city.v1', CITY_TTL = 30 * 86400000;
+  var city = { status: 'idle', data: null, done: [], total: 0, saved: 0, err: '', stats: null };
+  var db = null;
+  function idb() {
+    if (db) return db;
+    db = new Promise(function (res, rej) {
+      try { var r = indexedDB.open('sgim26hm', 1); r.onupgradeneeded = function () { r.result.createObjectStore('kv'); }; r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(r.error); }; }
+      catch (e) { rej(e); }
+    });
+    return db;
+  }
+  function idbGet(k) { return idb().then(function (d) { return new Promise(function (res) { try { var q = d.transaction('kv', 'readonly').objectStore('kv').get(k); q.onsuccess = function () { res(q.result || null); }; q.onerror = function () { res(null); }; } catch (e) { res(null); } }); }).catch(function () { return null; }); }
+  function idbSet(k, v) { return idb().then(function (d) { return new Promise(function (res) { try { var tx = d.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = function () { res(true); }; tx.onerror = function () { res(false); }; } catch (e) { res(false); } }); }).catch(function () { return false; }); }
+  function cityPieces() {
+    return C.routePieces(traceXY, 3000, 40).map(function (seg) { return C.simplify(seg, 15).map(function (p) { return proj.toLL(p[0], p[1]); }); });
+  }
+  function overpassAny(query, ms) {
+    var i = 0, last = null;
+    function next() {
+      if (i >= ENDPOINTS.length) return Promise.reject(last || new Error('no endpoint'));
+      var u = ENDPOINTS[i++];
+      return postOverpass(u, query, ms).catch(function (e) { last = e; return next(); });
+    }
+    return next();
+  }
+  function loadCity(force) {
+    if (city.status === 'loading') return;
+    city.status = 'loading'; city.err = ''; describeCity();
+    var pieces = cityPieces();
+    (force ? Promise.resolve(null) : idbGet(K_CITY)).then(function (rec) {
+      var fresh = rec && rec.v === 1 && rec.data && Array.isArray(rec.done) && rec.done.length === pieces.length && Date.now() - rec.t < CITY_TTL;
+      city.data = fresh ? rec.data : { buildings: [], trees: [], greens: [] };
+      city.done = fresh ? rec.done.slice() : pieces.map(function () { return false; });
+      city.saved = fresh ? rec.t : 0; city.total = pieces.length;
+      if (city.data.buildings.length) buildCity();
+      var k = 0;
+      function step() {
+        while (k < pieces.length && city.done[k]) k++;
+        if (k >= pieces.length) { city.status = 'ready'; describeCity(); return; }
+        describeCity();
+        return overpassAny(C.buildOverpassFeaturesQuery(pieces[k], 230), 120000).then(function (json) {
+          C.mergeFeatures(city.data, C.parseFeatures(json)); city.done[k] = true; city.saved = Date.now();
+          idbSet(K_CITY, { v: 1, t: city.saved, done: city.done, data: city.data });
+          buildCity(); k++; return step();
+        }, function (e) {
+          var blocked = !e || e.name === 'TypeError';
+          city.status = 'error';
+          city.err = blocked ? 'OpenStreetMap could not be reached from this page. Pages opened inside Claude cannot call other sites; the GitHub Pages copy, or the HTML file served from your computer, can.'
+            : 'The OpenStreetMap server did not answer (' + (e.message || 'error') + '). It is often busy; try again in a minute.';
+          describeCity(); if (city.data.buildings.length) buildCity();
+          toast(blocked ? 'Buildings need OpenStreetMap, which this page cannot reach. See Settings.' : 'OpenStreetMap is busy. Some buildings are missing; try again from Settings.', 5000);
+        });
+      }
+      return step();
+    });
+  }
+  function describeCity() {
+    var t = $('cityText'), b = $('cityLoad'), n = city.data ? city.data.buildings.length : 0, got = city.done.filter(Boolean).length;
+    if (city.status === 'loading') t.textContent = 'Loading from OpenStreetMap: ' + got + ' of ' + (city.total || 7) + ' stretches of the course' + (n ? ', ' + n + ' buildings so far.' : '.');
+    else if (city.status === 'error') t.textContent = city.err + (n ? ' Showing ' + n + ' buildings loaded earlier.' : '');
+    else if (city.status === 'ready' && city.stats) {
+      var st = city.stats;
+      t.textContent = n + ' buildings, ' + city.data.trees.length + ' trees and ' + city.data.greens.length + ' parks from OpenStreetMap, saved ' + new Date(city.saved).toLocaleDateString() + '. Heights: ' +
+        st.pctHeight + '% tagged, ' + st.pctLevels + '% from storey counts (3.2 m a storey), ' + st.pctDefault + '% estimated from the building type. ' + (st.culled ? st.culled + ' that the traced course runs through are left out.' : '');
+    } else t.textContent = 'Real building outlines and heights from OpenStreetMap load the first time you open Street view, then are kept in this browser for 30 days.';
+    b.disabled = city.status === 'loading';
+    b.textContent = city.status === 'loading' ? 'Loading\u2026' : city.status === 'ready' ? 'Reload from OpenStreetMap' : city.status === 'error' ? 'Try again' : 'Load buildings';
+    $('osmAttr').hidden = !(n && state.showCity && state.view !== '2d');
+  }
+  var WALL = {
+    light: { residential: 0xeceae6, commercial: 0xdde4ec, civic: 0xe9e2d8, industrial: 0xd6d9dd, light: 0xc9ced6, other: 0xe4e6ea, glass: '#93a3ba', tree: 0x5f9a52, trunk: 0x7a6250, green: 0xcfe5c4 },
+    dark: { residential: 0x3b4262, commercial: 0x34405e, civic: 0x3f3f5c, industrial: 0x353a4d, light: 0x2c3145, other: 0x383e5a, glass: '#4a5373', tree: 0x1f5a3c, trunk: 0x3b3230, green: 0x0f2c2a }
+  };
+  function windowTextures(dark, glass) {
+    var c = document.createElement('canvas'), e = document.createElement('canvas'); c.width = c.height = e.width = e.height = 256;
+    var x = c.getContext('2d'), y = e.getContext('2d'), seed = 7;
+    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+    x.fillStyle = '#ffffff'; x.fillRect(0, 0, 256, 256); y.fillStyle = '#000000'; y.fillRect(0, 0, 256, 256);
+    for (var i = 0; i < 4; i++) for (var j = 0; j < 4; j++) {
+      x.fillStyle = glass; x.fillRect(i * 64 + 12, j * 64 + 18, 40, 28);
+      if (dark && rnd() < 0.36) { y.fillStyle = rnd() < 0.8 ? '#ffd27a' : '#cfe2ff'; y.fillRect(i * 64 + 12, j * 64 + 18, 40, 28); }
+    }
+    function tex(cv) { var t = new T3.CanvasTexture(cv); t.wrapS = t.wrapT = T3.RepeatWrapping; t.anisotropy = Math.min(4, three.renderer.capabilities.getMaxAnisotropy()); return t; }
+    return { map: tex(c), emissive: dark ? tex(e) : null };
+  }
+  function disposeAll(g) {
+    for (var i = g.children.length - 1; i >= 0; i--) {
+      var c = g.children[i]; g.remove(c);
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) (Array.isArray(c.material) ? c.material : [c.material]).forEach(function (m) { if (m.userData.gone) return; m.userData.gone = true; if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); m.dispose(); });
+    }
+  }
+  function buildCity() {
+    if (!three || !city.data) return;
+    disposeAll(three.cityGroup); disposeAll(three.greenGroup);
+    var dark = state.theme === 'dark', P = WALL[dark ? 'dark' : 'light'], d = city.data;
+    var rings = d.buildings.map(function (b) { var r = []; for (var i = 0; i < b.ll.length; i += 2) { var p = proj.toXY(b.ll[i], b.ll[i + 1]); r.push(p[0], p[1]); } return r; });
+    var hit = C.corridorHits(rings, route.xy, ROAD_W / 2 + 2), cells = {}, CELL = 400, nH = 0, nL = 0, nD = 0, culled = 0, col = new T3.Color(), tmp = new T3.Color();
+    d.buildings.forEach(function (b, bi) {
+      if (hit[bi]) { culled++; return; }
+      var r = rings[bi], n = r.length / 2;
+      if (C.ringArea(r) < 0) { var rv = []; for (var q = n - 1; q >= 0; q--) rv.push(r[q * 2], r[q * 2 + 1]); r = rv; }    // counter-clockwise
+      if (b.src === 'height') nH++; else if (b.src === 'levels') nL++; else nD++;
+      var cx = 0, cy = 0; for (var i = 0; i < n; i++) { cx += r[i * 2]; cy += r[i * 2 + 1]; }
+      var key = Math.floor(cx / n / CELL) + ':' + Math.floor(cy / n / CELL), c = cells[key] || (cells[key] = { wp: [], wn: [], wu: [], wc: [], rp: [], rc: [] });
+      var jit = ((b.id * 2654435761) % 1000) / 1000 - 0.5;
+      col.set(P[b.kind] || P.other); col.offsetHSL(0, 0, jit * 0.06);
+      var plain = b.kind === 'light', per = 0, h = b.h, mh = b.minH;
+      for (i = 0; i < n; i++) {
+        var j = (i + 1) % n, ax = r[i * 2], ay = r[i * 2 + 1], bx = r[j * 2], by = r[j * 2 + 1], len = Math.hypot(bx - ax, by - ay);
+        if (len < 0.2) continue;
+        var nx = (by - ay) / len, ny = -(bx - ax) / len, u0 = per / 14.4, u1 = (per + len) / 14.4, v0 = mh / 12.8, v1 = h / 12.8;
+        if (plain) { u0 = u1 = 0.02; v0 = v1 = 0.02; }
+        per += len;
+        tmp.copy(col).multiplyScalar(0.9 + 0.1 * Math.abs(nx));      // faint per-facade variation
+        c.wp.push(ax, mh, -ay, bx, mh, -by, bx, h, -by, ax, mh, -ay, bx, h, -by, ax, h, -ay);
+        for (var k = 0; k < 6; k++) { c.wn.push(nx, 0, -ny); c.wc.push(tmp.r, tmp.g, tmp.b); }
+        c.wu.push(u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1);
+      }
+      try {
+        var contour = []; for (i = 0; i < n; i++) contour.push(new T3.Vector2(r[i * 2], r[i * 2 + 1]));
+        var tris = T3.ShapeUtils.triangulateShape(contour, []);
+        tmp.copy(col).multiplyScalar(0.84);
+        tris.forEach(function (tr) { tr.forEach(function (vi) { c.rp.push(r[vi * 2], h, -r[vi * 2 + 1]); c.rc.push(tmp.r, tmp.g, tmp.b); }); });
+      } catch (e) { /* skip a roof that will not triangulate */ }
+    });
+    var tx = windowTextures(dark, P.glass);
+    var wallMat = new T3.MeshLambertMaterial({ vertexColors: true, map: tx.map, side: T3.DoubleSide });
+    if (tx.emissive) { wallMat.emissive = new T3.Color(0xffffff); wallMat.emissiveMap = tx.emissive; wallMat.emissiveIntensity = 0.85; }
+    var roofMat = new T3.MeshLambertMaterial({ vertexColors: true, side: T3.DoubleSide });
+    var first = true;
+    Object.keys(cells).forEach(function (key) {
+      var c = cells[key];
+      if (c.wp.length) {
+        var g = new T3.BufferGeometry();
+        g.setAttribute('position', new T3.Float32BufferAttribute(c.wp, 3)); g.setAttribute('normal', new T3.Float32BufferAttribute(c.wn, 3));
+        g.setAttribute('uv', new T3.Float32BufferAttribute(c.wu, 2)); g.setAttribute('color', new T3.Float32BufferAttribute(c.wc, 3)); g.computeBoundingSphere();
+        var m = new T3.Mesh(g, wallMat); if (!first) m.userData.shared = true; three.cityGroup.add(m); first = false;
+      }
+      if (c.rp.length) {
+        var g2 = new T3.BufferGeometry(); g2.setAttribute('position', new T3.Float32BufferAttribute(c.rp, 3)); g2.setAttribute('color', new T3.Float32BufferAttribute(c.rc, 3));
+        g2.computeVertexNormals(); g2.computeBoundingSphere(); three.cityGroup.add(new T3.Mesh(g2, roofMat));
+      }
+    });
+    // trees: trunk + crown, sized from the height tag when there is one (8 m otherwise)
+    var trees = d.trees.map(function (t) { var p = proj.toXY(t.ll[0], t.ll[1]); return { x: p[0], y: p[1], h: t.h || 8 }; });
+    var treeHit = C.corridorHits(trees.map(function (t) { return [t.x - 0.5, t.y - 0.5, t.x + 0.5, t.y - 0.5, t.x + 0.5, t.y + 0.5, t.x - 0.5, t.y + 0.5]; }), route.xy, ROAD_W / 2 + 0.5);
+    trees = trees.filter(function (t, i) { return !treeHit[i]; });
+    if (trees.length) {
+      var trunk = new T3.InstancedMesh(new T3.CylinderGeometry(0.16, 0.24, 1, 6), new T3.MeshLambertMaterial({ color: P.trunk }), trees.length);
+      var crown = new T3.InstancedMesh(new T3.IcosahedronGeometry(1, 0), new T3.MeshLambertMaterial({ color: P.tree, flatShading: true }), trees.length);
+      var M4 = new T3.Matrix4(), Q = new T3.Quaternion(), S = new T3.Vector3();
+      trees.forEach(function (t, i) {
+        var th = t.h * 0.45, cr = t.h * 0.32;
+        M4.compose(new T3.Vector3(t.x, th / 2, -t.y), Q, S.set(1, th, 1)); trunk.setMatrixAt(i, M4);
+        Q.setFromAxisAngle(new T3.Vector3(0, 1, 0), (i * 1.7) % 6.28);
+        M4.compose(new T3.Vector3(t.x, th + cr * 0.7, -t.y), Q, S.set(cr, cr * 1.1, cr)); crown.setMatrixAt(i, M4); Q.identity();
+      });
+      three.cityGroup.add(trunk); three.cityGroup.add(crown);
+    }
+    // parks and green areas, flat in the ground pass
+    var gm = new T3.MeshBasicMaterial({ color: P.green, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false, side: T3.DoubleSide });
+    d.greens.forEach(function (gr) {
+      try {
+        var pts = []; for (var i = 0; i < gr.ll.length; i += 2) { var p = proj.toXY(gr.ll[i], gr.ll[i + 1]); pts.push(new T3.Vector2(p[0], p[1])); }
+        var tris = T3.ShapeUtils.triangulateShape(pts, []), pos = [];
+        tris.forEach(function (tr) { tr.forEach(function (vi) { pos.push(pts[vi].x, 0, -pts[vi].y); }); });
+        var gg = new T3.BufferGeometry(); gg.setAttribute('position', new T3.Float32BufferAttribute(pos, 3));
+        var mesh = new T3.Mesh(gg, gm); mesh.renderOrder = 2; three.greenGroup.add(mesh);
+      } catch (e) { /* skip */ }
+    });
+    var tot = Math.max(1, nH + nL + nD);
+    city.stats = { pctHeight: Math.round(nH / tot * 100), pctLevels: Math.round(nL / tot * 100), pctDefault: Math.round(nD / tot * 100), culled: culled, shown: nH + nL + nD };
+    three.cityGroup.visible = three.greenGroup.visible = state.showCity;
+    describeCity(); invalidate();
   }
 
   // chase camera for the street view: follows the runner from behind, with drag-to-look offsets
@@ -2123,7 +2477,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
       l.w = l.o.px * l.o.aspect; l.h = l.o.px;
       l.want = l.on && (l.group === 'km' ? state.showKm : state.showLm);
       if (l.want && state.view === 'street' && three.camera.position.distanceTo(l.anchor) > 3000) l.want = false;
-      l.p = l.prio + (state.sel === l.item.id ? 100 : 0);
+      l.p = l.prio + (state.sel === l.item.id ? 100 : 0) + (l.vis ? 0.5 : 0);
     });
     L.slice().sort(function (a, b) { return b.p - a.p; }).forEach(function (l) {
       var vis = l.want;
@@ -2452,13 +2806,14 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     $('view3d').setAttribute('aria-pressed', String(v === '3d')); $('view2d').setAttribute('aria-pressed', String(v === '2d')); $('viewStreet').setAttribute('aria-pressed', String(v === 'street'));
     $('map2d').hidden = v !== '2d'; $('views').hidden = v !== '3d' || !three;
     $('stage').classList.toggle('street', v === 'street');
+    $('osmAttr').hidden = !(city.data && city.data.buildings.length && state.showCity && v !== '2d');
     $('nav').hidden = v !== 'street'; $('roNext').hidden = v === 'street'; $('streetHint').hidden = v !== 'street';
     $('exag').disabled = v === 'street'; $('follow').disabled = v === 'street';
     if (three && (v === 'street') !== (was === 'street')) {
       var cam = three.camera, fog = three.scene.fog, st = v === 'street';
-      if (st) { overviewCam = { p: cam.position.clone(), t: three.controls.target.clone() }; three.tween = null; sc.snap = true; sc.yawOff = 0; }
+      if (st) { overviewCam = { p: cam.position.clone(), t: three.controls.target.clone() }; three.tween = null; sc.snap = true; sc.yawOff = 0; if (state.showCity && (city.status === 'idle' || (city.status === 'ready' && city.done.some(function (x) { return !x; })))) loadCity(false); }
       three.controls.enabled = !st;
-      cam.near = st ? 0.3 : 20; cam.far = st ? 9000 : 120000; cam.fov = st ? 55 : 38; cam.updateProjectionMatrix();
+      cam.near = st ? 0.8 : 20; cam.far = st ? 4000 : 120000; cam.fov = st ? 55 : 38; cam.updateProjectionMatrix();
       fog.near = st ? 220 : 16000; fog.far = st ? 2600 : 70000;
       three.groundMesh.position.y = st ? -0.08 : -2;
       three.streetGroup.visible = st; three.routeGroup.visible = !st; three.osmGroup.visible = !st;
@@ -2484,7 +2839,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     if (three) {
       three.renderer.setClearColor(th.sky, 1); three.scene.fog.color.set(th.sky); three.groundMesh.material.color.set(th.ground);
       three.bmU.cLand.value.set(th.land); three.bmU.cWater.value.set(th.water); three.bmU.cRoad.value.set(th.road);
-      rebuildRoute(); rebuildStreet();
+      rebuildRoute(); rebuildStreet(); buildCity();
     }
     drawChart();
     if (map2d) { drawMapRoute(false); setTiles(); }
@@ -2512,7 +2867,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
   function applyRoute(xy, source, stats) {
     state.source = source; state.osmStats = stats || null;
     applyFrame(source === 'osm' && stats ? stats.T : null);
-    setRoute(xy); rebuildRoute(); rebuildStreet(); drawMapRoute(false); setKm(state.km); describeSource(); renderList();
+    setRoute(xy); rebuildRoute(); rebuildStreet(); buildCity(); drawMapRoute(false); setKm(state.km); describeSource(); renderList();
   }
   var ENDPOINTS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
   function postOverpass(url, query, ms) {
@@ -2586,7 +2941,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
   function syncControls() {
     $('exag').value = state.exag; $('exagV').textContent = state.exag + '×';
     $('target').value = state.target; $('speed').value = state.sim; $('pacing').value = state.pacing; labelSim(); $('follow').checked = state.follow;
-    $('shSigns').checked = state.showSigns; syncStreetToggles();
+    $('shSigns').checked = state.showSigns; $('shLamps').checked = state.showLamps; $('shCity').checked = state.showCity; syncStreetToggles();
     $('shKm').checked = state.showKm; $('shLm').checked = state.showLm; $('shBase').checked = state.showBase; $('shCurtain').checked = state.showCurtain; $('shGrade').checked = state.grade;
     $('gradeLegend').hidden = !state.grade;
     syncTileForm();
@@ -2600,6 +2955,14 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
     $('themeBtn').addEventListener('click', function () { state.theme = state.theme === 'dark' ? 'light' : 'dark'; saveSettings(); applyTheme(); });
     $('theme').addEventListener('change', function () { state.theme = this.value === 'dark' ? 'dark' : 'light'; saveSettings(); applyTheme(); });
     $('shSigns').addEventListener('change', function () { state.showSigns = this.checked; saveSettings(); syncStreetToggles(); });
+    $('shLamps').addEventListener('change', function () { state.showLamps = this.checked; saveSettings(); syncStreetToggles(); });
+    $('shCity').addEventListener('change', function () {
+      state.showCity = this.checked; saveSettings();
+      if (three) { three.cityGroup.visible = three.greenGroup.visible = state.showCity; invalidate(); }
+      if (state.showCity && city.status === 'idle') loadCity(false);
+      describeCity();
+    });
+    $('cityLoad').addEventListener('click', function () { loadCity(city.status === 'ready'); });
     $('tileProv').addEventListener('change', function () { this.dataset.touched = '1'; syncTileForm(); });
     $('openPanel').addEventListener('click', function () { openPanel($('panel').hidden); });
     $('panelClose').addEventListener('click', function () { openPanel(false); });
@@ -2741,7 +3104,7 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
       poseRunner(three.figure, animT * 17.6, state.playing);
     }
     if (now - (three.lastDeclutter || 0) > 90) { declutter(); three.lastDeclutter = now; } else dirty = true;
-    three.renderer.render(three.scene, three.camera);
+    var rr = three.renderer; rr.clear(); rr.render(three.bgScene, three.camera); rr.clearDepth(); rr.render(three.scene, three.camera);
   }
 
   // ---------------------------------------------------------------- start
@@ -2755,9 +3118,16 @@ window.SGIM_BASEMAP = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABlAAAAVFCAY
   if (cached && cached.v === 2 && Array.isArray(cached.xy) && cached.xy.length > 50 && cached.stats) applyRoute(cached.xy, 'osm', cached.stats);
   else fetchOsm(true);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { rebuildMarkers(); rebuildStreet(); drawChart(); invalidate(); });
+  describeCity();
+  if (three) idbGet(K_CITY).then(function (rec) {
+    if (!rec || rec.v !== 1 || !rec.data || city.status !== 'idle') return;
+    city.data = rec.data; city.done = rec.done || []; city.saved = rec.t; city.total = city.done.length;
+    city.status = Date.now() - rec.t < CITY_TTL ? 'ready' : 'idle';
+    buildCity();
+  });
   requestAnimationFrame(frame);
 
-  window.__sgim = { turns: function () { return turns; }, sc: sc, streetY: streetY, state: state, timeAt: function (k) { return timeAt(k); }, setKm: setKm, select: select, setView: setView, fetchOsm: fetchOsm, three: function () { return three; }, route: function () { return route; } };
+  window.__sgim = { city: city, loadCity: loadCity, turns: function () { return turns; }, sc: sc, streetY: streetY, state: state, timeAt: function (k) { return timeAt(k); }, setKm: setKm, select: select, setView: setView, fetchOsm: fetchOsm, three: function () { return three; }, route: function () { return route; } };
 })();
 
 </script>

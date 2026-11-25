@@ -484,7 +484,150 @@
     return { km: km, m: m };
   }
 
+  // ---------- OpenStreetMap buildings, trees and green areas near the course ----------
+  function buildOverpassFeaturesQuery(routeLL, radius) {
+    var c = routeLL.map(function (p) { return p[0].toFixed(5) + ',' + p[1].toFixed(5); }).join(','), r = radius || 230;
+    return '[out:json][timeout:120];(' +
+      'way[building](around:' + r + ',' + c + ');' +
+      'way["building:part"](around:' + r + ',' + c + ');' +
+      'node[natural=tree](around:45,' + c + ');' +
+      'way[leisure~"^(park|garden|pitch|playground|golf_course)$"](around:' + r + ',' + c + ');' +
+      'way[landuse~"^(grass|recreation_ground|village_green|cemetery)$"](around:' + r + ',' + c + ');' +
+      'way[natural~"^(wood|scrub|grassland)$"](around:' + r + ',' + c + ');' +
+      ');out geom qt;';
+  }
+  // "12", "12 m", "40'" -> metres; NaN if absent
+  function parseMetres(v) {
+    if (v == null) return NaN;
+    var m = String(v).replace(',', '.').match(/-?\d+(\.\d+)?/);
+    if (!m) return NaN;
+    var n = parseFloat(m[0]);
+    return /ft|'/.test(String(v)) ? n * 0.3048 : n;
+  }
+  var KIND = {
+    residential: /^(apartments|residential|house|detached|semidetached_house|terrace|dormitory|bungalow)$/,
+    commercial: /^(commercial|office|retail|hotel|supermarket|mall)$/,
+    civic: /^(school|university|college|hospital|public|civic|government|church|cathedral|temple|mosque|chapel|museum|train_station|transportation|stadium|sports_centre|fire_station|police)$/,
+    industrial: /^(industrial|warehouse|manufacture|hangar|service|parking|garage|garages|carport)$/,
+    light: /^(roof|shed|hut|kiosk|cabin|toilets|shelter|bridge|canopy)$/
+  };
+  var DEFAULT_H = { residential: 36, commercial: 24, civic: 16, industrial: 9, light: 4, other: 10 };
+  function buildingKind(v) {
+    for (var k in KIND) if (KIND[k].test(v)) return k;
+    return 'other';
+  }
+  /* Height and base from OSM tags: height / building:levels (3.2 m a storey, plus a little for the roof),
+     min_height / building:min_level. Without either, a default for the kind of building (an assumption). */
+  function buildingHeight(tags) {
+    var kind = buildingKind(tags.building && tags.building !== 'yes' ? tags.building : (tags['building:part'] && tags['building:part'] !== 'yes' ? tags['building:part'] : ''));
+    var h = parseMetres(tags.height), lv = parseMetres(tags['building:levels']), mh = parseMetres(tags.min_height), mlv = parseMetres(tags['building:min_level']);
+    var source = 'height';
+    if (!(h > 0)) { if (lv > 0) { h = lv * 3.2 + 1; source = 'levels'; } else { h = DEFAULT_H[kind]; source = 'default'; } }
+    if (!(mh >= 0)) mh = mlv > 0 ? mlv * 3.2 : 0;
+    if (kind === 'light' && !(mh > 0) && /^(roof|canopy|shelter)$/.test(tags.building || '')) mh = Math.max(0, h - 1);
+    h = Math.min(h, 350); mh = Math.max(0, Math.min(mh, h - 0.5));
+    return { h: h, minH: mh, kind: kind, source: source };
+  }
+  function ringArea(ll) {          // flat [x0,y0,x1,y1,...], signed shoelace area (positive = counter-clockwise)
+    var a = 0, n = ll.length / 2;
+    for (var i = 0, j = n - 1; i < n; j = i++) a += (ll[j * 2] * ll[i * 2 + 1] - ll[i * 2] * ll[j * 2 + 1]);
+    return a / 2;
+  }
+  function pointInRing(x, y, r) {  // r flat [x0,y0,...]
+    var inside = false, n = r.length / 2;
+    for (var i = 0, j = n - 1; i < n; j = i++) {
+      var xi = r[i * 2], yi = r[i * 2 + 1], xj = r[j * 2], yj = r[j * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  function centroid(r) { var x = 0, y = 0, n = r.length / 2; for (var i = 0; i < n; i++) { x += r[i * 2]; y += r[i * 2 + 1]; } return [x / n, y / n]; }
+  /* Overpass JSON -> {buildings:[{id, ll:[lat,lon,...], h, minH, kind}], trees:[{ll:[lat,lon], h}], greens:[{id, ll}]}.
+     Coordinates stay in lat/lon so the cache does not depend on the projection. A building outline that
+     contains building:part ways is replaced by its parts (that is how OSM models shaped towers). */
+  function parseFeatures(json) {
+    var out = { buildings: [], trees: [], greens: [] };
+    if (!json || !Array.isArray(json.elements)) return out;
+    var outlines = [], parts = [], seen = {};
+    json.elements.forEach(function (el) {
+      if (!el || !el.tags) return;
+      var t = el.tags;
+      if (el.type === 'node') {
+        if (t.natural === 'tree' && typeof el.lat === 'number' && typeof el.lon === 'number') out.trees.push({ ll: [+el.lat.toFixed(6), +el.lon.toFixed(6)], h: parseMetres(t.height) > 0 ? Math.min(40, parseMetres(t.height)) : 0 });
+        return;
+      }
+      if (el.type !== 'way' || !Array.isArray(el.geometry) || seen[el.id]) return;
+      seen[el.id] = 1;
+      var ll = [];
+      el.geometry.forEach(function (g) { if (g && typeof g.lat === 'number' && typeof g.lon === 'number') ll.push(+g.lat.toFixed(7), +g.lon.toFixed(7)); });
+      if (ll.length >= 4 && ll[0] === ll[ll.length - 2] && ll[1] === ll[ll.length - 1]) ll.length -= 2;   // drop the closing point
+      if (ll.length < 6) return;
+      var areaM2 = Math.abs(ringArea(ll)) * 111320 * 110574 * Math.cos(ll[0] * Math.PI / 180);
+      var bp = t['building:part'];
+      if ((t.building && t.building !== 'no') || (bp && bp !== 'no')) {
+        if (areaM2 < 6) return;
+        var hb = buildingHeight(t), rec = { id: el.id, ll: ll, h: +hb.h.toFixed(1), minH: +hb.minH.toFixed(1), kind: hb.kind, src: hb.source };
+        (bp && bp !== 'no' ? parts : outlines).push(rec);
+      } else if (areaM2 >= 30) out.greens.push({ id: el.id, ll: ll });
+    });
+    // outlines with parts inside them are drawn as their parts
+    parts.forEach(function (p) { p.c = centroid(p.ll); });
+    outlines.forEach(function (o) {
+      var r = o.ll, minA = 1e9, maxA = -1e9, minB = 1e9, maxB = -1e9;
+      for (var i = 0; i < r.length; i += 2) { minA = Math.min(minA, r[i]); maxA = Math.max(maxA, r[i]); minB = Math.min(minB, r[i + 1]); maxB = Math.max(maxB, r[i + 1]); }
+      var has = parts.some(function (p) { return p.c[0] >= minA && p.c[0] <= maxA && p.c[1] >= minB && p.c[1] <= maxB && pointInRing(p.c[0], p.c[1], r); });
+      if (!has) out.buildings.push(o);
+    });
+    parts.forEach(function (p) { delete p.c; out.buildings.push(p); });
+    return out;
+  }
+  function mergeFeatures(a, b) {
+    var ids = {};
+    a.buildings.forEach(function (x) { ids[x.id] = 1; });
+    b.buildings.forEach(function (x) { if (!ids[x.id]) { ids[x.id] = 1; a.buildings.push(x); } });
+    var tk = {}; a.trees.forEach(function (t) { tk[t.ll.join()] = 1; });
+    b.trees.forEach(function (t) { var k = t.ll.join(); if (!tk[k]) { tk[k] = 1; a.trees.push(t); } });
+    var gk = {}; a.greens.forEach(function (g) { gk[g.id] = 1; });
+    b.greens.forEach(function (g) { if (!gk[g.id]) { gk[g.id] = 1; a.greens.push(g); } });
+    return a;
+  }
+  /* Buildings that the course would run through: any corner, edge midpoint or the centre within `clear`
+     metres of the course line, or a course point inside the footprint. ringsXY: [[x0,y0,x1,y1,...]]. */
+  function corridorHits(ringsXY, routeXY, clear) {
+    var ix = buildIndex([{ pts: routeXY, foot: false }], 50), pts = resample(routeXY, 6), grid = {}, cell = 50, i, j;
+    pts.forEach(function (p) { var k = Math.floor(p[0] / cell) + ':' + Math.floor(p[1] / cell); (grid[k] || (grid[k] = [])).push(p); });
+    var any = { R: clear, maxAng: Math.PI, allowFoot: true };
+    return ringsXY.map(function (r) {
+      var n = r.length / 2, c = centroid(r);
+      if (nearest(ix, c[0], c[1], 0, any)) return true;
+      for (i = 0; i < n; i++) {
+        var x = r[i * 2], y = r[i * 2 + 1], k2 = (i + 1) % n;
+        if (nearest(ix, x, y, 0, any) || nearest(ix, (x + r[k2 * 2]) / 2, (y + r[k2 * 2 + 1]) / 2, 0, any)) return true;
+      }
+      var mx = 1e9, Mx = -1e9, my = 1e9, My = -1e9;
+      for (i = 0; i < n; i++) { mx = Math.min(mx, r[i * 2]); Mx = Math.max(Mx, r[i * 2]); my = Math.min(my, r[i * 2 + 1]); My = Math.max(My, r[i * 2 + 1]); }
+      for (i = Math.floor(mx / cell); i <= Math.floor(Mx / cell); i++) for (j = Math.floor(my / cell); j <= Math.floor(My / cell); j++) {
+        var arr = grid[i + ':' + j]; if (!arr) continue;
+        for (var q = 0; q < arr.length; q++) if (pointInRing(arr[q][0], arr[q][1], r)) return true;
+      }
+      return false;
+    });
+  }
+  // split the course into overlapping pieces of about `pieceM` metres for separate Overpass requests
+  function routePieces(xy, pieceM, stepM) {
+    var L = cumLen(xy), total = L[L.length - 1], n = Math.max(1, Math.round(total / pieceM)), out = [];
+    for (var k = 0; k < n; k++) {
+      var a = total * k / n, b = total * (k + 1) / n, seg = [];
+      for (var s = a; s < b; s += stepM) seg.push(pointAt(xy, L, s).slice(0, 2));
+      seg.push(pointAt(xy, L, b).slice(0, 2));
+      out.push(seg);
+    }
+    return out;
+  }
+
   return {
+    buildOverpassFeaturesQuery: buildOverpassFeaturesQuery, parseMetres: parseMetres, buildingHeight: buildingHeight, buildingKind: buildingKind,
+    ringArea: ringArea, pointInRing: pointInRing, parseFeatures: parseFeatures, mergeFeatures: mergeFeatures, corridorHits: corridorHits, routePieces: routePieces,
     wrapDeg: wrapDeg, classifyTurn: classifyTurn, compass: compass, computeTurns: computeTurns, nextTurnIndex: nextTurnIndex, streetGround: streetGround,
     runCost: runCost, buildPacing: buildPacing, timeAtKm: timeAtKm, kmAtTime: kmAtTime, paceAtKm: paceAtKm, fmtPace: fmtPace,
     makeProjection: makeProjection, cumLen: cumLen, findSeg: findSeg, pointAt: pointAt, resample: resample, simplify: simplify,
