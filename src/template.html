@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SGIM 2026 Half Marathon 3D Route</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/*__LEAFLET_CSS__*/
+</style>
+<style>
+/* Layout idea: the 3D course fills the screen; a profile strip docks along the bottom as the timeline;
+   lists and settings live in one drawer (bottom sheet on phones, right column on wide screens).
+   Light (daytime map) by default; the app's own Dark option is the night-race look. The theme is the
+   app's setting, not the host's, so it is keyed on html.dark rather than [data-theme]. */
+:root {
+  color-scheme: light;
+  --ink: #eef1f6;        /* page and sky */
+  --panel: #ffffff;      /* surfaces */
+  --panel-2: #eef1f8;    /* raised controls */
+  --rule: #d3d9e6;       /* hairlines */
+  --text: #121833;
+  --muted: #586282;
+  --course: #d4147f;     /* the route */
+  --course-ink: #ffffff; /* text on the course colour */
+  --runner: #e09400;     /* runner and current selection */
+  --climb: #e2590b;
+  --descent: #0a7fb5;
+  --guide: #0b6b4f;      /* turn-by-turn banner and signs */
+  --overlay: rgba(255,255,255,.93);
+  --map-bg: #e5e9f0;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Barlow", "Helvetica Neue", Arial, sans-serif;
+  --dock-h: 148px;
+  --top-h: 52px;
+}
+html.dark {
+  color-scheme: dark;
+  --ink: #040716; --panel: #0c1230; --panel-2: #151d48; --rule: #2a3572; --text: #eceeff; --muted: #9aa4d8;
+  --course: #ff3ecf; --course-ink: #1b0218; --runner: #ffd447; --climb: #ff8a3d; --descent: #4cc9f0;
+  --guide: #0d7d5c; --overlay: rgba(12,18,48,.9); --map-bg: #0a0f28;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--ink); color: var(--text); font: 400 15px/1.4 var(--font-body); overflow: hidden; -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--runner); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.num { font-variant-numeric: tabular-nums; }
+
+#app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--top-h) minmax(0, 1fr) var(--dock-h); }
+
+/* ---- top bar ---- */
+#top { display: flex; align-items: center; gap: 10px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--rule); min-width: 0; }
+#top h1 { font: 700 20px/1 var(--font-display); letter-spacing: .02em; text-transform: uppercase; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+#top h1 span { color: var(--course); }
+#top h1 small { font-size: inherit; color: var(--muted); }
+.seg { display: inline-flex; background: var(--ink); border: 1px solid var(--rule); border-radius: 8px; padding: 2px; flex: none; }
+.seg button { border: 0; background: transparent; padding: 6px 10px; border-radius: 6px; font-weight: 600; font-size: 13px; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--panel-2); color: var(--text); }
+.btn { border: 1px solid var(--rule); background: var(--panel-2); border-radius: 8px; padding: 7px 11px; font-weight: 600; font-size: 13px; flex: none; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--course); border-color: var(--course); color: var(--course-ink); }
+.btn.icon { padding: 6px 8px; line-height: 0; }
+.btn.icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.btn[disabled] { opacity: .5; cursor: default; }
+
+/* ---- stage ---- */
+#stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ink); }
+#gl, #map2d { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#gl { touch-action: none; }
+#map2d { background: var(--map-bg); z-index: 1; }
+#map2d.tiles-osm .leaflet-tile-pane { filter: grayscale(.85) brightness(1.04) contrast(.94); }
+html.dark #map2d.tiles-osm .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) grayscale(.55) brightness(.88) contrast(.92); }
+#readout { position: absolute; left: 10px; top: 10px; z-index: 5; background: var(--overlay); border: 1px solid var(--rule); border-radius: 10px; padding: 8px 12px; max-width: min(330px, calc(100% - 20px)); pointer-events: none; }
+#readout .big { font: 700 30px/1 var(--font-display); letter-spacing: .01em; }
+#readout .big small { font-size: 15px; color: var(--muted); font-weight: 600; margin-left: 4px; }
+#readout .row { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-top: 3px; }
+#readout .row b { color: var(--text); font-weight: 600; }
+#readout .sec { font-size: 13px; margin-top: 3px; }
+#readout .next { color: var(--guide); font-weight: 600; }
+html.dark #readout .next { color: #5fd3a8; }
+/* turn-by-turn banner (street view) */
+#nav { position: absolute; left: 10px; top: 10px; z-index: 6; width: min(460px, calc(100% - 20px)); background: var(--guide); color: #fff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,.28); overflow: hidden; pointer-events: none; }
+.navmain { display: flex; gap: 12px; align-items: center; padding: 10px 14px; }
+.navmain svg { width: 46px; height: 46px; flex: none; }
+.navmain svg, .navthen svg { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.navdist { font: 700 30px/1 var(--font-display); letter-spacing: .01em; }
+.navins { font-weight: 600; font-size: 15.5px; line-height: 1.25; margin-top: 2px; text-wrap: balance; }
+.navthen { display: flex; gap: 8px; align-items: center; padding: 6px 14px; font-size: 13px; background: rgba(0,0,0,.2); }
+.navthen svg { width: 18px; height: 18px; stroke-width: 2.6; }
+#stage.street #readout { top: auto; bottom: 10px; }
+#streetHint { position: absolute; right: 10px; top: 10px; z-index: 5; background: var(--overlay); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 9px; font-size: 12px; color: var(--muted); max-width: 190px; }
+#views { position: absolute; right: 10px; top: 10px; z-index: 5; display: flex; flex-direction: column; gap: 4px; }
+#views button { border: 1px solid var(--rule); background: var(--overlay); border-radius: 7px; min-width: 44px; padding: 6px 8px; font-weight: 600; font-size: 12px; }
+#views button:hover { border-color: var(--muted); }
+#toast { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 6; background: var(--panel-2); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 12px; font-size: 13px; max-width: calc(100% - 24px); text-align: center; }
+#mapnote { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 500; background: var(--overlay); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+#glfail { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); z-index: 4; }
+
+/* ---- dock: elevation profile + transport ---- */
+#dock { background: var(--panel); border-top: 1px solid var(--rule); display: grid; grid-template-rows: minmax(0, 1fr) 44px; min-width: 0; }
+#chartwrap { position: relative; min-height: 0; }
+#chart { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: ew-resize; }
+#transport { display: flex; align-items: center; gap: 8px; padding: 0 10px 6px; min-width: 0; }
+#transport .btn { padding: 6px 10px; }
+#pacing, .sel { background: var(--ink); border: 1px solid var(--rule); border-radius: 8px; padding: 9px 8px; width: 100%; }
+#transport select { background: var(--panel-2); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 6px; font-size: 13px; font-weight: 600; }
+#transport .grow { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.toggle input { accent-color: var(--course); width: 16px; height: 16px; margin: 0; }
+
+/* ---- drawer ---- */
+#panel { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000; max-height: 76%; height: 76%; background: var(--panel); border-top: 1px solid var(--rule); border-radius: 14px 14px 0 0; display: grid; grid-template-rows: auto minmax(0, 1fr); box-shadow: 0 -12px 40px rgba(0,0,0,.5); }
+#panel header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+#panel header .seg { flex: 1 1 auto; }
+#panel header .seg button { flex: 1 1 0; }
+.pane { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; -webkit-overflow-scrolling: touch; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > label, .legend { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+input[type="search"], input[type="text"] { background: var(--ink); border: 1px solid var(--rule); border-radius: 8px; padding: 9px 10px; width: 100%; }
+input[type="range"] { width: 100%; accent-color: var(--course); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--rule); background: transparent; border-radius: 999px; padding: 4px 11px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.chip[aria-pressed="true"] { background: var(--panel-2); color: var(--text); border-color: var(--muted); }
+#list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+#list li { border-top: 1px solid var(--rule); }
+#list li:first-child { border-top: 0; }
+#list button { width: 100%; display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 10px; align-items: baseline; text-align: left; background: transparent; border: 0; padding: 9px 4px; border-radius: 6px; }
+#list button:hover, #list button[aria-current="true"] { background: var(--panel-2); }
+#list .km { font: 700 17px/1 var(--font-display); color: var(--course); }
+#list .nm { font-weight: 600; overflow-wrap: anywhere; }
+#list .sub { display: block; font-size: 12.5px; color: var(--muted); font-weight: 400; }
+.tag { display: inline-block; font-size: 11px; font-weight: 600; border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; color: var(--muted); margin-left: 6px; vertical-align: 1px; }
+.empty { color: var(--muted); padding: 10px 4px; }
+#info { border: 1px solid var(--rule); border-left: 3px solid var(--runner); border-radius: 8px; padding: 10px 12px; background: var(--ink); display: flex; flex-direction: column; gap: 6px; }
+#info h2 { font: 700 20px/1.1 var(--font-display); text-transform: uppercase; letter-spacing: .02em; margin: 0; text-wrap: balance; }
+#info p { margin: 0; font-size: 14px; }
+#info dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 12px; margin: 0; font-size: 13px; }
+#info dt { color: var(--muted); }
+#info dd { margin: 0; }
+#info .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.card { border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.card p { margin: 0; font-size: 13.5px; color: var(--muted); }
+.card p b { color: var(--text); font-weight: 600; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+.rowwrap { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ramp { height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--descent), #cfcaff 50%, var(--climb)); }
+.rampl { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
+#copybox { width: 100%; height: 110px; background: var(--ink); color: var(--text); border: 1px solid var(--rule); border-radius: 8px; font: 12px/1.3 ui-monospace, Menlo, Consolas, monospace; padding: 8px; }
+.fine { font-size: 12px; color: var(--muted); }
+.fine a { color: var(--text); }
+
+@media (min-width: 960px) {
+  #app { grid-template-columns: minmax(0, 1fr) 372px; }
+  #top { grid-column: 1 / -1; }
+  #panel { position: static; grid-column: 2; grid-row: 2 / 4; max-height: none; height: auto; border-radius: 0; border-top: 0; border-left: 1px solid var(--rule); box-shadow: none; display: grid !important; }
+  #panelClose, #openPanel { display: none; }
+  #top h1 { font-size: 22px; }
+}
+@media (max-width: 480px) {
+  #top { gap: 8px; padding: 0 10px; }
+  #top h1 { font-size: 15.5px; }
+  #top h1 small, #srcBadge { display: none; }
+  .seg button { padding: 6px 8px; }
+  #readout .big { font-size: 26px; }
+  .navdist { font-size: 26px; }
+  .navmain svg { width: 40px; height: 40px; }
+  #streetHint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <h1><span>adidas</span> Half Marathon <small>2026</small></h1>
+    <div class="seg" role="group" aria-label="View">
+      <button id="view3d" type="button" aria-pressed="true">3D</button>
+      <button id="viewStreet" type="button" aria-pressed="false">Street</button>
+      <button id="view2d" type="button" aria-pressed="false">Map</button>
+    </div>
+    <button id="themeBtn" class="btn icon" type="button" aria-label="Switch to dark mode"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="themeIcon" d=""/></svg></button>
+    <button id="openPanel" class="btn" type="button" aria-controls="panel" aria-expanded="false">Menu</button>
+  </header>
+
+  <main id="stage">
+    <canvas id="gl" aria-label="3D model of the half marathon course. Drag to rotate, pinch or scroll to zoom, tap the course or a label to select it."></canvas>
+    <div id="map2d" hidden></div>
+    <div id="mapnote" hidden></div>
+    <div id="glfail" hidden>This browser could not start WebGL, so the 3D view is unavailable. The Map view and the elevation profile still work.</div>
+    <div id="readout" aria-live="off">
+      <div class="big num"><span id="roKm">0.00</span><small>km</small></div>
+      <div class="row num"><span>Elevation <b id="roEl">12.0 m</b></span><span>Gradient <b id="roGr">0.0%</b></span></div>
+      <div class="row num"><span>Elapsed <b id="roT">0:00:00</b></span><span>Clock <b id="roC">04:30</b></span><span>Pace <b id="roP">5:41 /km</b></span></div>
+      <div class="sec" id="roSec"></div>
+      <div class="sec next" id="roNext"></div>
+    </div>
+    <div id="nav" hidden role="status" aria-live="polite">
+      <div class="navmain">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path id="navIcon" d=""/></svg>
+        <div><div class="navdist num" id="navDist"></div><div class="navins" id="navIns"></div></div>
+      </div>
+      <div class="navthen" id="navThen" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path id="navThenIcon" d=""/></svg><span id="navThenText"></span></div>
+    </div>
+    <div id="streetHint" hidden>Drag to look around. Scroll or pinch to move the camera closer. Double-click to reset.</div>
+    <div id="views" role="group" aria-label="Camera">
+      <button type="button" data-view="iso">Iso</button>
+      <button type="button" data-view="top">Top</button>
+      <button type="button" data-view="n" title="Look from the north">N</button>
+      <button type="button" data-view="e" title="Look from the east">E</button>
+      <button type="button" data-view="s" title="Look from the south">S</button>
+      <button type="button" data-view="w" title="Look from the west">W</button>
+    </div>
+    <div id="toast" role="status" hidden></div>
+  </main>
+
+  <section id="dock" aria-label="Elevation profile and playback">
+    <div id="chartwrap"><canvas id="chart" role="slider" tabindex="0" aria-label="Position along the course" aria-valuemin="0" aria-valuemax="21.0975" aria-valuenow="0"></canvas></div>
+    <div id="transport">
+      <button id="restart" class="btn" type="button" aria-label="Back to the start">&#9198;</button>
+      <button id="play" class="btn primary" type="button">Play</button>
+      <label class="toggle" for="speed" style="gap:4px"><span class="fine">Clock</span>
+        <select id="speed" aria-describedby="simNote"><option value="1">Real time</option><option value="10">10&times;</option><option value="30">30&times;</option><option value="60" selected>60&times;</option><option value="120">120&times;</option><option value="300">300&times;</option><option value="preview">Preview</option></select>
+      </label>
+      <label class="toggle" for="follow"><input id="follow" type="checkbox"> Follow</label>
+      <span class="grow" id="srcBadge"></span>
+    </div>
+  </section>
+
+  <aside id="panel" hidden aria-label="Course details and settings">
+    <header>
+      <div class="seg" role="group" aria-label="Panel">
+        <button id="tabPlaces" type="button" aria-pressed="true">Course</button>
+        <button id="tabSettings" type="button" aria-pressed="false">Settings</button>
+      </div>
+      <button id="panelClose" class="btn" type="button" aria-label="Close menu">Close</button>
+    </header>
+
+    <div class="pane" id="panePlaces">
+      <div id="info" hidden></div>
+      <div class="field">
+        <label for="q">Search landmarks and roads</label>
+        <input id="q" type="search" placeholder="e.g. Sheares, Keppel, Merlion" autocomplete="off">
+      </div>
+      <div class="chips" role="group" aria-label="Filter">
+        <button class="chip" type="button" data-filter="all" aria-pressed="true">All</button>
+        <button class="chip" type="button" data-filter="landmark" aria-pressed="false">Landmarks</button>
+        <button class="chip" type="button" data-filter="section" aria-pressed="false">Road sections</button>
+        <button class="chip" type="button" data-filter="point" aria-pressed="false">Profile points</button>
+        <button class="chip" type="button" data-filter="turn" aria-pressed="false">Directions</button>
+        <button class="chip" type="button" data-filter="km" aria-pressed="false">Splits</button>
+      </div>
+      <ul id="list"></ul>
+    </div>
+
+    <div class="pane" id="paneSettings" hidden>
+      <div class="field">
+        <label for="theme">Theme</label>
+        <select id="theme" class="sel"><option value="light">Light</option><option value="dark">Dark (night race)</option></select>
+      </div>
+      <div class="field">
+        <label for="exag">Vertical exaggeration <span class="num" id="exagV">20&times;</span></label>
+        <input id="exag" type="range" min="1" max="40" step="1" value="20">
+        <span class="fine" id="exagNote">Lowest to highest point is only 23 m, so heights are stretched to make the bridge readable. Street view always uses true heights.</span>
+      </div>
+      <div class="field">
+        <label for="target">Target finish time</label>
+        <input id="target" type="text" inputmode="numeric" value="2:00:00" aria-describedby="targetHelp">
+        <span class="fine" id="targetHelp">h:mm:ss, between 1:00:00 and the 3:45:00 cut-off. Times count from the 4:30 am flag-off.</span>
+      </div>
+      <div class="field">
+        <label for="pacing">Pacing</label>
+        <select id="pacing"><option value="effort">Even effort: slower uphill, faster downhill</option><option value="even">Even pace: same speed throughout</option></select>
+        <span class="fine" id="simNote"></span>
+        <span class="fine">Even effort scales pace with the energy cost of running on a slope (Minetti et al., 2002) and counts only half of the downhill saving. It is a model, not a prediction of your race.</span>
+      </div>
+      <div class="stack">
+        <span class="legend">Show</span>
+        <label class="toggle" for="shKm"><input id="shKm" type="checkbox" checked> Kilometre markers</label>
+        <label class="toggle" for="shLm"><input id="shLm" type="checkbox" checked> Landmarks</label>
+        <label class="toggle" for="shBase"><input id="shBase" type="checkbox" checked> Street map underlay</label>
+        <label class="toggle" for="shCurtain"><input id="shCurtain" type="checkbox" checked> Elevation curtain</label>
+        <label class="toggle" for="shSigns"><input id="shSigns" type="checkbox" checked> Turn signs in street view</label>
+        <label class="toggle" for="shGrade"><input id="shGrade" type="checkbox"> Colour the course by gradient</label>
+        <div id="gradeLegend" hidden><div class="ramp"></div><div class="rampl"><span>&minus;4% down</span><span>flat</span><span>+4% up</span></div></div>
+      </div>
+      <div class="card">
+        <span class="legend">Road geometry</span>
+        <p id="srcText"></p>
+        <div class="rowwrap">
+          <button id="fetchOsm" class="btn primary" type="button">Fetch OpenStreetMap roads</button>
+          <button id="useTrace" class="btn" type="button" hidden>Use built-in trace</button>
+        </div>
+      </div>
+      <div class="card">
+        <span class="legend">Map tiles</span>
+        <div class="field"><label for="tileProv">Provider</label>
+          <select id="tileProv" class="sel">
+            <option value="osm">OpenStreetMap, recoloured to the theme (no key)</option>
+            <option value="carto">CARTO Positron / Dark Matter (free key)</option>
+            <option value="custom">Another provider (paste its URL)</option>
+          </select></div>
+        <p id="tileHelp"></p>
+        <div class="field" id="tileKeyRow" hidden><label for="tileKey">CARTO key</label>
+          <input id="tileKey" type="text" autocomplete="off" spellcheck="false" placeholder="Key from carto.com/basemaps/apikey"></div>
+        <div id="tileCustomRow" class="stack" hidden>
+          <div class="field"><label for="tileUrl">Tile URL template</label>
+            <input id="tileUrl" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://&hellip;/{z}/{x}/{y}.png?key=YOUR_KEY"></div>
+          <div class="field"><label for="tileAttr">Attribution the provider requires</label>
+            <input id="tileAttr" type="text" autocomplete="off" placeholder="&copy; Provider, &copy; OpenStreetMap contributors"></div>
+        </div>
+        <div class="rowwrap"><button id="tileSave" class="btn" type="button">Use these tiles</button></div>
+        <p>Keys are saved only in this browser.</p>
+      </div>
+      <div class="card">
+        <span class="legend">Export the current route</span>
+        <div class="rowwrap">
+          <button id="copyGpx" class="btn" type="button">Copy GPX</button>
+          <button id="copyGeo" class="btn" type="button">Copy GeoJSON</button>
+        </div>
+        <textarea id="copybox" hidden readonly aria-label="Export text"></textarea>
+      </div>
+      <div class="rowwrap"><button id="resetAll" class="btn" type="button">Reset settings</button></div>
+      <p class="fine">Course traced from the organiser&rsquo;s route map dated 17 August 2026, which says the route is subject to change. Heights are digitised from the map&rsquo;s elevation profile. Not an official map. Road data, when fetched: &copy; OpenStreetMap contributors.</p>
+      <p class="fine">Turn-by-turn directions are worked out from the traced course line and the road names listed under Course. At ramps and complicated junctions they can be wrong; the official map wins.</p>
+      <p class="fine">Keys: Space plays or pauses, arrow keys move 100 m (Shift for 1 km), R resets the camera.</p>
+    </div>
+  </aside>
+</div>
+
+<!--__LIBS__-->
+<script>
+window.SGIM_DATA = /*__DATA__*/null;
+window.SGIM_BASEMAP = "__BASEMAP__";
+</script>
+<script>
+/*__CORE__*/
+</script>
+<script>
+/*__APP__*/
+</script>
+</body>
+</html>

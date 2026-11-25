@@ -1,0 +1,9 @@
+node_modules
+build/
+__pycache__/
+*.pyc
+*.blend1
+# the organiser's route map is not redistributed; download it here (see README)
+reference/*
+!reference/.gitkeep
+.DS_Store

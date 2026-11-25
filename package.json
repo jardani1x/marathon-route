@@ -1,0 +1,17 @@
+{
+  "name": "marathon-route",
+  "version": "1.0.0",
+  "private": true,
+  "description": "3D model, street view and race-clock simulation of the BYD Singapore International Marathon 2026 adidas Half Marathon course (unofficial).",
+  "scripts": {
+    "build": "python3 scripts/build_viewer.py && python3 scripts/build_blender.py",
+    "serve": "python3 -m http.server 8000",
+    "test": "node test/test_core.js && node test/test_turns.js && python3 test/test_port.py",
+    "test:browser": "node test/sim.js && node test/tiles.js"
+  },
+  "devDependencies": {
+    "leaflet": "1.9.4",
+    "playwright": "^1.63.0",
+    "three": "0.128.0"
+  }
+}
